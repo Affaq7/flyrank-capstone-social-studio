@@ -43,3 +43,23 @@ class Variant(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
 
     post = relationship("Post", back_populates="variants")
+
+
+class Slot(Base):
+    __tablename__ = "slots"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    variant_id = Column(String, ForeignKey("variants.id"), nullable=False)
+    scheduled_time = Column(DateTime(timezone=True), nullable=False, default=_now)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+
+class PublishAttempt(Base):
+    __tablename__ = "publish_attempts"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    slot_id = Column(String, ForeignKey("slots.id"), nullable=False)
+    idempotency_key = Column(String, nullable=False, unique=True)
+    status = Column(String, nullable=False)  # "success" | "failed"
+    response_detail = Column(String, nullable=True)
+    attempted_at = Column(DateTime(timezone=True), nullable=False, default=_now)
