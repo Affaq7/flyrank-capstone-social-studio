@@ -57,20 +57,28 @@ right now" from `slots`/`variants` fresh, so it doesn't matter which tick
 
 ## Run it
 
-**1. Start Postgres:**
+**1. Configure secrets:** copy `.env.example` to `.env` and fill in
+`DISCORD_WEBHOOK_URL` and `GEMINI_API_KEY` (a free-tier key works — see
+`GEMINI_MODEL` for the default model). This must happen *before* starting
+Postgres in the next step — `docker-compose.yml` reads `POSTGRES_USER`/
+`POSTGRES_PASSWORD`/`POSTGRES_DB` from `.env` automatically, and a
+container initialized without them (or restarted after they change) won't
+match the credentials in `DATABASE_URL`.
+Everything else in `.env.example` already has a working local default,
+including `WORKER_POLL_SECONDS` (10s, how often the worker checks for due
+slots) and `WORKER_DEMO_DELAY_SECONDS` (0, an optional artificial pause
+between each slot in a batch — only useful for manually demonstrating the
+worker-restart crash-safety scenario; leave it at `0` for normal use).
+
+**2. Start Postgres:**
 ```bash
 docker compose up -d
 ```
 
-**2. Install dependencies** (Python 3.11+, a virtualenv is recommended):
+**3. Install dependencies** (Python 3.11+, a virtualenv is recommended):
 ```bash
 pip install -r requirements.txt
 ```
-
-**3. Configure secrets:** copy `.env.example` to `.env` and fill in
-`DISCORD_WEBHOOK_URL` and `GEMINI_API_KEY` (a free-tier key works — see
-`GEMINI_MODEL` for the default model). Everything else in `.env.example`
-already has a working local default.
 
 **4. Run the API server:**
 ```bash
@@ -85,15 +93,34 @@ python worker_main.py
 It polls every `WORKER_POLL_SECONDS` (default 10) for due, approved slots.
 
 **6. Seed a sample post** (with the server running, in a third terminal):
+
+macOS/Linux (bash):
 ```bash
 curl -X POST http://127.0.0.1:8000/posts \
   -H "Content-Type: application/json" \
   -d '{"markdown": "# Hello World\n\nThis is a sample post to seed the system."}'
 ```
+
+Windows (PowerShell):
+```powershell
+$post = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://127.0.0.1:8000/posts `
+  -ContentType "application/json" `
+  -Body '{"markdown": "# Hello World\n\nThis is a sample post to seed the system."}'
+$post.Content
+```
+
 Copy the returned `id`, then generate its variants:
+
+macOS/Linux (bash):
 ```bash
 curl -X POST http://127.0.0.1:8000/posts/<id>/variants
 ```
+
+Windows (PowerShell):
+```powershell
+Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://127.0.0.1:8000/posts/<id>/variants
+```
+
 This returns one variant per platform (`discord`/`x`/`linkedin`), each
 `status: "draft"`. From here, use Swagger to approve one
 (`PATCH /variants/{id}/approve`) and either publish it immediately
