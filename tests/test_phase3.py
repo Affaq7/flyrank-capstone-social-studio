@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 SAMPLE_MARKDOWN = """
 # Why Idempotent Publishing Matters
 
@@ -17,6 +19,10 @@ def _create_variants(client):
     return variants_response.json()
 
 
+def _future_time() -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+
 def test_approve_then_schedule_succeeds(client):
     variant = _create_variants(client)[0]
 
@@ -24,16 +30,24 @@ def test_approve_then_schedule_succeeds(client):
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "approved"
 
-    schedule_response = client.post(f"/variants/{variant['id']}/schedule")
+    schedule_response = client.post(
+        f"/variants/{variant['id']}/schedule",
+        json={"scheduled_time": _future_time()},
+    )
     assert schedule_response.status_code == 200
-    assert schedule_response.json() == {"status": "would_schedule"}
+    body = schedule_response.json()
+    assert body["status"] == "scheduled"
+    assert body["variant_id"] == variant["id"]
 
 
 def test_schedule_unapproved_variant_returns_4xx_with_reason(client):
     variant = _create_variants(client)[0]
     assert variant["status"] == "draft"
 
-    schedule_response = client.post(f"/variants/{variant['id']}/schedule")
+    schedule_response = client.post(
+        f"/variants/{variant['id']}/schedule",
+        json={"scheduled_time": _future_time()},
+    )
     assert schedule_response.status_code in (400, 422)
     assert "draft" in schedule_response.json()["detail"]
 

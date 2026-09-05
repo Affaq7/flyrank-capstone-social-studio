@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from app.main import app
-from app.models import PublishAttempt
+from app.models import PublishAttempt, Slot
 from app.publishers.base import PublishResult
 from app.publishers.mocks import MockLinkedInPublisher, MockXPublisher
 from app.publishers.registry import PLATFORM_ADAPTERS, get_adapters
@@ -41,6 +41,27 @@ def _create_variants(client):
 
 def _override_adapter(platform: str, adapter) -> None:
     app.dependency_overrides[get_adapters] = lambda: {**PLATFORM_ADAPTERS, platform: adapter}
+
+
+def _success_count_for(db_session, variant_id: str) -> int:
+    """Scoped to one variant, not a table-wide count — the shared dev
+    database can have unrelated leftover success rows from manual testing."""
+    return (
+        db_session.query(PublishAttempt)
+        .join(Slot, PublishAttempt.slot_id == Slot.id)
+        .filter(Slot.variant_id == variant_id)
+        .filter(PublishAttempt.status == "success")
+        .count()
+    )
+
+
+def _attempt_count_for(db_session, variant_id: str) -> int:
+    return (
+        db_session.query(PublishAttempt)
+        .join(Slot, PublishAttempt.slot_id == Slot.id)
+        .filter(Slot.variant_id == variant_id)
+        .count()
+    )
 
 
 def test_publish_approved_variant_succeeds_via_correct_adapter(client):
@@ -87,10 +108,7 @@ def test_repeated_publish_call_creates_exactly_one_success_record(client, db_ses
     # before reaching the adapter.
     assert spy.call_count == 1
 
-    success_count = (
-        db_session.query(PublishAttempt).filter(PublishAttempt.status == "success").count()
-    )
-    assert success_count == 1
+    assert _success_count_for(db_session, variant["id"]) == 1
 
 
 def test_retry_after_failed_publish_updates_existing_attempt_row(client, db_session):
@@ -113,8 +131,7 @@ def test_retry_after_failed_publish_updates_existing_attempt_row(client, db_sess
     # Exactly one publish_attempts row total for this variant's key — the
     # retry updated the existing row instead of inserting a second one
     # under the same unique idempotency_key.
-    total_attempts = db_session.query(PublishAttempt).count()
-    assert total_attempts == 1
+    assert _attempt_count_for(db_session, variant["id"]) == 1
 
 
 def test_adapter_swap_changes_nothing_but_config(client):
