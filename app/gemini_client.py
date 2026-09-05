@@ -56,7 +56,7 @@ def generate(profile: ConstraintProfile, content: str) -> tuple[str, list[str]]:
     response) — callers are responsible for falling back to a template.
     """
     client = _get_client()
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     response = client.models.generate_content(
         model=model_name,
         contents=_build_prompt(profile, content),

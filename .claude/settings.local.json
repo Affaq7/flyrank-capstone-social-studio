@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"./venv/Scripts/python.exe\" -m pip install -r requirements.txt --quiet)",
+      "Bash(\"./venv/Scripts/python.exe\" -m pytest tests/test_phase2.py -v)",
+      "Bash(\"./venv/Scripts/python.exe\" -m pip uninstall -y google-generativeai --quiet)",
+      "Bash(\"./venv/Scripts/python.exe\" -m pip install google-genai --quiet)",
+      "Bash(\"./venv/Scripts/python.exe\" -m pip show google-genai)",
+      "Bash(docker exec *)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/posts/038277bf-35eb-45cf-af9d-ce4048030e54/variants)",
+      "Bash(python -m json.tool)",
+      "Bash(tee /tmp/pytest_output.txt)",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(\"./venv/Scripts/python.exe\" -m pip install trafilatura --quiet)",
+      "Bash(\"./venv/Scripts/python.exe\" -m pip show trafilatura)"
+    ]
+  }
+}

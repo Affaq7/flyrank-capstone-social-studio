@@ -1,3 +1,5 @@
+import requests
+
 # pyrefly: ignore [missing-import]
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.orm import Session
@@ -17,7 +19,13 @@ app = FastAPI(title="Social Media Studio")
 @app.post("/posts", response_model=PostOut, status_code=201)
 def create_post(payload: PostCreate, db: Session = Depends(get_db)):
     if payload.url:
-        content = fetch_url_content(payload.url)
+        try:
+            content = fetch_url_content(payload.url)
+        except requests.RequestException as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not fetch url: {exc}",
+            ) from exc
         post = Post(source_type="url", source_url=payload.url, content=content)
     else:
         post = Post(source_type="markdown", source_url=None, content=payload.markdown)
