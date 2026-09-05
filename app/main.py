@@ -9,7 +9,7 @@ from app.db import Base, engine, get_db
 from app.generation import generate_variant
 from app.ingestion import fetch_url_content
 from app.models import Post, Variant
-from app.schemas import PostCreate, PostOut, VariantOut
+from app.schemas import PostCreate, PostOut, RejectRequest, VariantEdit, VariantOut
 
 Base.metadata.create_all(bind=engine)
 
@@ -69,3 +69,72 @@ def create_variants(post_id: str, db: Session = Depends(get_db)):
         db.refresh(variant)
 
     return variants
+
+
+def _get_variant_or_404(db: Session, variant_id: str) -> Variant:
+    variant = db.get(Variant, variant_id)
+    if variant is None:
+        raise HTTPException(status_code=404, detail=f"Variant {variant_id} not found")
+    return variant
+
+
+@app.patch("/variants/{variant_id}/approve", response_model=VariantOut)
+def approve_variant(variant_id: str, db: Session = Depends(get_db)):
+    variant = _get_variant_or_404(db, variant_id)
+    variant.status = "approved"
+    db.commit()
+    db.refresh(variant)
+    return variant
+
+
+@app.patch("/variants/{variant_id}/reject", response_model=VariantOut)
+def reject_variant(
+    variant_id: str,
+    payload: RejectRequest = RejectRequest(),
+    db: Session = Depends(get_db),
+):
+    variant = _get_variant_or_404(db, variant_id)
+    variant.status = "rejected"
+    variant.rejection_reason = payload.rejection_reason
+    db.commit()
+    db.refresh(variant)
+    return variant
+
+
+@app.patch("/variants/{variant_id}", response_model=VariantOut)
+def edit_variant(variant_id: str, payload: VariantEdit, db: Session = Depends(get_db)):
+    variant = _get_variant_or_404(db, variant_id)
+
+    new_body = payload.body if payload.body is not None else variant.body
+    new_hashtags = payload.hashtags if payload.hashtags is not None else variant.hashtags
+
+    profile = PROFILES[variant.platform]
+    violations = validate(profile, new_body, new_hashtags)
+    if violations:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{variant.platform}: " + "; ".join(v.message for v in violations),
+        )
+
+    variant.body = new_body
+    variant.hashtags = new_hashtags
+    variant.status = "draft"
+    variant.rejection_reason = None
+
+    db.commit()
+    db.refresh(variant)
+    return variant
+
+
+@app.post("/variants/{variant_id}/schedule")
+def schedule_variant(variant_id: str, db: Session = Depends(get_db)):
+    variant = _get_variant_or_404(db, variant_id)
+    if variant.status != "approved":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"variant is in '{variant.status}' status; "
+                "only 'approved' variants can be scheduled."
+            ),
+        )
+    return {"status": "would_schedule"}
