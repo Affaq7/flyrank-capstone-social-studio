@@ -1,14 +1,14 @@
 # Phase 1 Design — Constraint Profiles, Publisher Interface, Data Model
 
-Stack assumed: **Python + FastAPI**, SQLite storage, real adapter = **Discord**.
-Mock platforms: **MockXPublisher** (X-style) and **MockInstagramPublisher** (Instagram-style).
+Stack assumed: **Python + FastAPI**, **PostgreSQL** storage, real adapter = **Discord**.
+Mock platforms: **MockXPublisher** (X-style) and **MockLinkedInPublisher** (LinkedIn-style).
 
-> Deviation from CLAUDE.md: the architecture rules currently name
-> `MockLinkedInPublisher` as the second mock. Per this session's direction we're
-> building `MockInstagramPublisher` instead, to get a mock with a genuinely
-> different constraint shape (media-required, hard hashtag cap) rather than
-> another text-first platform. CLAUDE.md should be updated to reflect this
-> before Phase 2 implementation starts.
+> Correction (Phase 2): this document originally assumed SQLite and an
+> Instagram-style second mock, per exploratory framing at the time. CLAUDE.md
+> has since locked in the real decisions — Postgres via Docker, and
+> Discord + X-style + LinkedIn-style as the three platforms — and this
+> document has been updated to match. The DDL and profiles below reflect
+> Postgres and LinkedIn, not the original SQLite/Instagram draft.
 
 No implementation code in this document — interfaces and schemas only, to be
 implemented in later phases.
@@ -24,7 +24,7 @@ it for every platform, so adding a platform never touches business logic.
 
 ```python
 class ConstraintProfile(BaseModel):
-    platform: str                  # "x" | "instagram" | "discord"
+    platform: str                  # "x" | "linkedin" | "discord"
     max_length: int                # characters, after link/media placeholders expand
     max_hashtags: int
     max_media: int                 # 0 = text-only allowed
@@ -56,26 +56,52 @@ X_PROFILE = ConstraintProfile(
 )
 ```
 
-### Instagram-style profile
+### LinkedIn-style profile
 
 | Field | Value | Rationale |
 |---|---|---|
-| `max_length` | 2200 | Instagram's actual caption limit |
-| `max_hashtags` | 30 | Instagram hard-rejects posts over 30 hashtags |
-| `max_media` | 10 | Carousel post limit |
-| `min_media` | 1 | Instagram has no text-only post type — this is the key structural difference from X, and it's why a variant approved for X can still be rejected outright for Instagram |
+| `max_length` | 3000 | LinkedIn's actual post character limit |
+| `max_hashtags` | 5 | No platform-enforced cap, but house style rule — LinkedIn posts read as spammy past a handful of hashtags |
+| `max_media` | 9 | LinkedIn's multi-image post limit |
+| `min_media` | 0 | Text-only posts are the common case on LinkedIn |
 | `allowed_media_types` | `["image", "video"]` | |
-| `tone_notes` | "Visual-first; caption supports the image, not the other way around" | |
+| `tone_notes` | "Professional, first-person insight; thought-leadership framing" | |
 
 ```python
-INSTAGRAM_PROFILE = ConstraintProfile(
-    platform="instagram",
-    max_length=2200,
-    max_hashtags=30,
-    max_media=10,
-    min_media=1,
+LINKEDIN_PROFILE = ConstraintProfile(
+    platform="linkedin",
+    max_length=3000,
+    max_hashtags=5,
+    max_media=9,
+    min_media=0,
     allowed_media_types=["image", "video"],
-    tone_notes="Visual-first; caption supports the image, not the other way around",
+    tone_notes="Professional, first-person insight; thought-leadership framing",
+)
+```
+
+### Discord profile
+
+The real adapter needs a profile too — Discord's own constraint is structural
+(a hard API limit on message content), not a style choice like the other two.
+
+| Field | Value | Rationale |
+|---|---|---|
+| `max_length` | 2000 | Discord's hard cap on message content, enforced by the API itself |
+| `max_hashtags` | 5 | House rule — Discord has no native hashtag feature, so this only bounds stylistic use |
+| `max_media` | 10 | Attachment count we choose to support per message |
+| `min_media` | 0 | Text-only messages are the default case |
+| `allowed_media_types` | `["image", "video"]` | |
+| `tone_notes` | "Casual, community-oriented; can reference channels/roles" | |
+
+```python
+DISCORD_PROFILE = ConstraintProfile(
+    platform="discord",
+    max_length=2000,
+    max_hashtags=5,
+    max_media=10,
+    min_media=0,
+    allowed_media_types=["image", "video"],
+    tone_notes="Casual, community-oriented; can reference channels/roles",
 )
 ```
 
@@ -90,7 +116,7 @@ never reaches review" directly.
 ## 2. `SocialPublisher` interface
 
 The app talks to exactly one interface. Swapping `MockXPublisher` /
-`MockInstagramPublisher` / `DiscordPublisher` in and out is a config change
+`MockLinkedInPublisher` / `DiscordPublisher` in and out is a config change
 (which class gets instantiated for a given platform string), never a
 business-logic change.
 
@@ -172,38 +198,42 @@ contract, kept separate from the half that has side effects.
 
 ## 3. Data model
 
-Five entities. SQLite DDL shown as the source of truth; a short note on each
-table's role follows.
+Five entities. Postgres DDL shown as the source of truth; a short note on
+each table's role follows. (`posts`/`variants` are the two Phase 2 actually
+creates — `slots`/`publish_attempts` are shown here for completeness of the
+overall design but are built in the scheduling phase.)
 
 ```sql
 CREATE TABLE posts (
     id            TEXT PRIMARY KEY,   -- uuid
-    title         TEXT NOT NULL,      -- internal label, not published anywhere
-    created_by    TEXT NOT NULL,
-    created_at    TEXT NOT NULL       -- ISO 8601
+    source_type   TEXT NOT NULL       -- "url" | "markdown"
+                  CHECK (source_type IN ('url','markdown')),
+    source_url    TEXT,               -- set when source_type = 'url'
+    content       TEXT NOT NULL,      -- the single source of truth for generation
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE variants (
     id            TEXT PRIMARY KEY,   -- uuid
     post_id       TEXT NOT NULL REFERENCES posts(id),
-    platform      TEXT NOT NULL,      -- "x" | "instagram" | "discord"
+    platform      TEXT NOT NULL,      -- "x" | "linkedin" | "discord"
     body          TEXT NOT NULL,
-    media_urls    TEXT NOT NULL,      -- JSON array
-    hashtags      TEXT NOT NULL,      -- JSON array
-    status        TEXT NOT NULL       -- draft | pending_review | approved | rejected
-                  CHECK (status IN ('draft','pending_review','approved','rejected')),
+    hashtags      TEXT[] NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL       -- draft | pending_review | approved | rejected | published
+                  CHECK (status IN ('draft','pending_review','approved','rejected','published')),
+    generation_source TEXT NOT NULL   -- "gemini" | "template_fallback"
+                  CHECK (generation_source IN ('gemini','template_fallback')),
     rejection_reason TEXT,            -- set when status = rejected (constraint or human)
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE slots (
     id            TEXT PRIMARY KEY,   -- uuid
     variant_id    TEXT NOT NULL REFERENCES variants(id),
-    scheduled_for TEXT NOT NULL,      -- ISO 8601, when the worker should publish
+    scheduled_for TIMESTAMPTZ NOT NULL, -- when the worker should publish
     status        TEXT NOT NULL       -- pending | claimed | published | failed | cancelled
                   CHECK (status IN ('pending','claimed','published','failed','cancelled')),
-    created_at    TEXT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     -- one variant is published at most once per slot; a variant CAN have
     -- multiple slots (e.g. resubmitted after a failure creates a new slot,
@@ -221,8 +251,8 @@ CREATE TABLE publish_attempts (
     external_post_id  TEXT,               -- set on success
     error_message     TEXT,               -- set on failure
     attempt_count     INTEGER NOT NULL DEFAULT 1,
-    started_at        TEXT NOT NULL,
-    finished_at       TEXT,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ,
 
     -- THE constraint that makes idempotency structural rather than
     -- best-effort: claiming a slot for publish is a single atomic INSERT
