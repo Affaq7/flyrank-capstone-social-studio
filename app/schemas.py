@@ -31,3 +31,19 @@ class VariantOut(BaseModel):
     hashtags: list[str]
     status: str
     generation_source: str
+    rejection_reason: str | None
+
+
+class VariantEdit(BaseModel):
+    body: str | None = None
+    hashtags: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self):
+        if self.body is None and self.hashtags is None:
+            raise ValueError("Provide at least one of `body` or `hashtags`")
+        return self
+
+
+class RejectRequest(BaseModel):
+    rejection_reason: str | None = None
