@@ -7,5 +7,6 @@ google-genai
 requests
 beautifulsoup4
 trafilatura
+apscheduler
 pytest
 httpx
