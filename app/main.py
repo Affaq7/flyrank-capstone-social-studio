@@ -11,9 +11,18 @@ from app.db import Base, engine, get_db
 from app.generation import generate_variant
 from app.ingestion import fetch_url_content
 from app.models import Post, PublishAttempt, Slot, Variant
+from app.publish_service import PublishPendingError, get_or_create_slot, publish_variant_now
 from app.publishers.base import SocialPublisher
 from app.publishers.registry import get_adapters
-from app.schemas import PostCreate, PostOut, RejectRequest, VariantEdit, VariantOut
+from app.schemas import (
+    PostCreate,
+    PostOut,
+    PublishAttemptOut,
+    RejectRequest,
+    ScheduleRequest,
+    VariantEdit,
+    VariantOut,
+)
 
 Base.metadata.create_all(bind=engine)
 
@@ -131,7 +140,9 @@ def edit_variant(variant_id: str, payload: VariantEdit, db: Session = Depends(ge
 
 
 @app.post("/variants/{variant_id}/schedule")
-def schedule_variant(variant_id: str, db: Session = Depends(get_db)):
+def schedule_variant(
+    variant_id: str, payload: ScheduleRequest, db: Session = Depends(get_db)
+):
     variant = _get_variant_or_404(db, variant_id)
     if variant.status != "approved":
         raise HTTPException(
@@ -141,7 +152,22 @@ def schedule_variant(variant_id: str, db: Session = Depends(get_db)):
                 "only 'approved' variants can be scheduled."
             ),
         )
-    return {"status": "would_schedule"}
+
+    scheduled_time = payload.scheduled_time
+    if scheduled_time.tzinfo is None:
+        scheduled_time = scheduled_time.replace(tzinfo=timezone.utc)
+    if scheduled_time <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=422,
+            detail="scheduled_time must be in the future",
+        )
+
+    slot = get_or_create_slot(db, variant, scheduled_time)
+    return {
+        "variant_id": variant.id,
+        "scheduled_time": slot.scheduled_time,
+        "status": "scheduled",
+    }
 
 
 @app.post("/variants/{variant_id}/publish", response_model=VariantOut)
@@ -160,44 +186,32 @@ def publish_variant(
             ),
         )
 
-    slot = db.query(Slot).filter(Slot.variant_id == variant.id).first()
-    if slot is None:
-        slot = Slot(variant_id=variant.id)
-        db.add(slot)
-        db.commit()
-        db.refresh(slot)
+    slot = get_or_create_slot(db, variant)
+    try:
+        return publish_variant_now(db, variant, slot, adapters)
+    except PublishPendingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    idempotency_key = f"{variant.id}:{slot.id}"
-    attempt = (
-        db.query(PublishAttempt)
-        .filter(PublishAttempt.idempotency_key == idempotency_key)
-        .first()
+
+@app.get("/publish-history", response_model=list[PublishAttemptOut])
+def publish_history(db: Session = Depends(get_db)):
+    rows = (
+        db.query(PublishAttempt, Slot, Variant)
+        .join(Slot, PublishAttempt.slot_id == Slot.id)
+        .join(Variant, Slot.variant_id == Variant.id)
+        .order_by(PublishAttempt.attempted_at.desc())
+        .all()
     )
-
-    if attempt is not None and attempt.status == "success":
-        return variant
-
-    result = adapters[variant.platform].publish(variant.body, idempotency_key)
-
-    if attempt is None:
-        attempt = PublishAttempt(
+    return [
+        PublishAttemptOut(
+            id=attempt.id,
+            variant_id=variant.id,
+            platform=variant.platform,
             slot_id=slot.id,
-            idempotency_key=idempotency_key,
-            status="success" if result.success else "failed",
-            response_detail=result.detail,
+            idempotency_key=attempt.idempotency_key,
+            status=attempt.status,
+            response_detail=attempt.response_detail,
+            attempted_at=attempt.attempted_at,
         )
-        db.add(attempt)
-    else:
-        # A previously failed attempt under this key, being retried after
-        # whatever broke it got fixed — update in place, never insert a
-        # second row for a key that already exists.
-        attempt.status = "success" if result.success else "failed"
-        attempt.response_detail = result.detail
-        attempt.attempted_at = datetime.now(timezone.utc)
-
-    if result.success:
-        variant.status = "published"
-
-    db.commit()
-    db.refresh(variant)
-    return variant
+        for attempt, slot, variant in rows
+    ]

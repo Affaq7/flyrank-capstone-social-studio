@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
@@ -47,3 +49,20 @@ class VariantEdit(BaseModel):
 
 class RejectRequest(BaseModel):
     rejection_reason: str | None = None
+
+
+class ScheduleRequest(BaseModel):
+    scheduled_time: datetime
+
+
+class PublishAttemptOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    variant_id: str
+    platform: str
+    slot_id: str
+    idempotency_key: str
+    status: str
+    response_detail: str | None
+    attempted_at: datetime
