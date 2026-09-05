@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import requests
 
 # pyrefly: ignore [missing-import]
@@ -8,7 +10,9 @@ from app.constraints import PROFILES, validate
 from app.db import Base, engine, get_db
 from app.generation import generate_variant
 from app.ingestion import fetch_url_content
-from app.models import Post, Variant
+from app.models import Post, PublishAttempt, Slot, Variant
+from app.publishers.base import SocialPublisher
+from app.publishers.registry import get_adapters
 from app.schemas import PostCreate, PostOut, RejectRequest, VariantEdit, VariantOut
 
 Base.metadata.create_all(bind=engine)
@@ -138,3 +142,62 @@ def schedule_variant(variant_id: str, db: Session = Depends(get_db)):
             ),
         )
     return {"status": "would_schedule"}
+
+
+@app.post("/variants/{variant_id}/publish", response_model=VariantOut)
+def publish_variant(
+    variant_id: str,
+    db: Session = Depends(get_db),
+    adapters: dict[str, SocialPublisher] = Depends(get_adapters),
+):
+    variant = _get_variant_or_404(db, variant_id)
+    if variant.status not in ("approved", "published"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"variant is in '{variant.status}' status; "
+                "only 'approved' variants can be published."
+            ),
+        )
+
+    slot = db.query(Slot).filter(Slot.variant_id == variant.id).first()
+    if slot is None:
+        slot = Slot(variant_id=variant.id)
+        db.add(slot)
+        db.commit()
+        db.refresh(slot)
+
+    idempotency_key = f"{variant.id}:{slot.id}"
+    attempt = (
+        db.query(PublishAttempt)
+        .filter(PublishAttempt.idempotency_key == idempotency_key)
+        .first()
+    )
+
+    if attempt is not None and attempt.status == "success":
+        return variant
+
+    result = adapters[variant.platform].publish(variant.body, idempotency_key)
+
+    if attempt is None:
+        attempt = PublishAttempt(
+            slot_id=slot.id,
+            idempotency_key=idempotency_key,
+            status="success" if result.success else "failed",
+            response_detail=result.detail,
+        )
+        db.add(attempt)
+    else:
+        # A previously failed attempt under this key, being retried after
+        # whatever broke it got fixed — update in place, never insert a
+        # second row for a key that already exists.
+        attempt.status = "success" if result.success else "failed"
+        attempt.response_detail = result.detail
+        attempt.attempted_at = datetime.now(timezone.utc)
+
+    if result.success:
+        variant.status = "published"
+
+    db.commit()
+    db.refresh(variant)
+    return variant
